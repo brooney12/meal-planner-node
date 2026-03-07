@@ -61,7 +61,7 @@ describe('Login form', () => {
 
     await userEvent.type(screen.getByLabelText(/Username/i), 'alice')
     await userEvent.type(screen.getByLabelText(/Password/i), 'secret')
-    await userEvent.click(screen.getAllByRole('button', { name: 'Log in' }).at(-1)!)
+    await userEvent.click(screen.getAllByRole('button', { name: 'Log in' }).slice(-1)[0])
 
     await waitFor(() => {
       expect(mockLogin).toHaveBeenCalledWith('alice', 'secret')
@@ -74,7 +74,7 @@ describe('Login form', () => {
 
     await userEvent.type(screen.getByLabelText(/Username/i), 'alice')
     await userEvent.type(screen.getByLabelText(/Password/i), 'wrong')
-    await userEvent.click(screen.getAllByRole('button', { name: 'Log in' }).at(-1)!)
+    await userEvent.click(screen.getAllByRole('button', { name: 'Log in' }).slice(-1)[0])
 
     expect(await screen.findByText('Invalid credentials')).toBeInTheDocument()
   })
@@ -86,7 +86,7 @@ describe('Login form', () => {
 
     await userEvent.type(screen.getByLabelText(/Username/i), 'alice')
     await userEvent.type(screen.getByLabelText(/Password/i), 'pass')
-    await userEvent.click(screen.getAllByRole('button', { name: 'Log in' }).at(-1)!)
+    await userEvent.click(screen.getAllByRole('button', { name: 'Log in' }).slice(-1)[0])
 
     expect(await screen.findByText('Please wait…')).toBeInTheDocument()
     resolve()
@@ -129,7 +129,7 @@ describe('Register form', () => {
 
     await userEvent.type(screen.getByLabelText(/Username/i), 'alice')
     await userEvent.type(screen.getByLabelText(/Password/i), 'wrong')
-    await userEvent.click(screen.getAllByRole('button', { name: 'Log in' }).at(-1)!)
+    await userEvent.click(screen.getAllByRole('button', { name: 'Log in' }).slice(-1)[0])
     expect(await screen.findByText('Bad creds')).toBeInTheDocument()
 
     await userEvent.click(screen.getByRole('button', { name: 'Register' }))
