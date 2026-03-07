@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import type { MealEntryResponse, Meal } from '../types'
 import {
   authApi,
+  mealsApi,
+  planApi,
   getCurrentWeekLabel,
   shiftWeek,
   weekRangeLabel,
@@ -122,6 +124,59 @@ describe('weekRangeLabel', () => {
     expect(label).toContain('–')
     const parts = label.split(' – ')
     expect(parts).toHaveLength(2)
+  })
+})
+
+// ── mealsApi ─────────────────────────────────────────────────────────────────
+describe('mealsApi.getAll', () => {
+  it('fetches and returns the meal list', async () => {
+    const meals: Meal[] = [
+      { id: 1, name: 'Oats', emoji: '🥣', calories: 300, protein: 10, carbs: 50, fat: 5 },
+    ]
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => meals,
+    }))
+    expect(await mealsApi.getAll()).toEqual(meals)
+  })
+})
+
+// ── planApi ───────────────────────────────────────────────────────────────────
+describe('planApi', () => {
+  const meal: Meal = { id: 1, name: 'Oats', emoji: '🥣', calories: 300, protein: 10, carbs: 50, fat: 5 }
+  const entry: MealEntryResponse = { id: 1, dayOfWeek: 'Mon', mealType: 'Breakfast', weekLabel: '2026-W10', meal }
+
+  beforeEach(() => {
+    localStorage.setItem('mp_token', 'test-token')
+  })
+
+  it('getWeek fetches entries for the given week', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, json: async () => [entry],
+    }))
+    expect(await planApi.getWeek('2026-W10')).toEqual([entry])
+  })
+
+  it('setSlot sends a PUT with slot data and returns the entry', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, json: async () => entry,
+    }))
+    expect(await planApi.setSlot('Mon', 'Breakfast', 1, '2026-W10')).toEqual(entry)
+  })
+
+  it('clearSlot sends a PUT with mealId null', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, json: async () => ({ message: 'Slot cleared' }),
+    }))
+    expect(await planApi.clearSlot('Mon', 'Breakfast', '2026-W10')).toEqual({ message: 'Slot cleared' })
+  })
+
+  it('bulkSet sends a PUT to /plan/bulk', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, json: async () => [entry],
+    }))
+    expect(await planApi.bulkSet('2026-W10', [{ dayOfWeek: 'Mon', mealType: 'Breakfast', mealId: 1 }])).toEqual([entry])
   })
 })
 
