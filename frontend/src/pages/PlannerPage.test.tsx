@@ -5,7 +5,7 @@ import PlannerPage from './PlannerPage'
 
 // ── Mock api module ───────────────────────────────────────────────────────────
 vi.mock('../services/api', () => ({
-  mealsApi: { getAll: vi.fn() },
+  mealsApi: { getAll: vi.fn(), create: vi.fn(), update: vi.fn(), delete: vi.fn() },
   planApi: {
     getWeek: vi.fn(),
     setSlot: vi.fn(),
@@ -20,12 +20,31 @@ vi.mock('../services/api', () => ({
 
 // ── Mock MealPickerModal ──────────────────────────────────────────────────────
 vi.mock('../components/MealPickerModal', () => ({
-  default: ({ onSelect, onClose }: { onSelect: (m: Meal) => void; onClose: () => void }) => (
+  default: ({
+    onSelect,
+    onClose,
+    onMealCreate,
+    onMealUpdate,
+    onMealDelete,
+  }: {
+    onSelect: (m: Meal) => void
+    onClose: () => void
+    onMealCreate: (data: Omit<Meal, 'id'>) => Promise<void>
+    onMealUpdate: (id: number, data: Omit<Meal, 'id'>) => Promise<void>
+    onMealDelete: (id: number) => Promise<void>
+  }) => (
     <div data-testid="meal-picker">
       <button onClick={() => onSelect({ id: 99, name: 'Test Meal', emoji: '🥗', calories: 400, protein: 20, carbs: 30, fat: 10 })}>
         Pick meal
       </button>
       <button onClick={onClose}>Close picker</button>
+      <button onClick={() => onMealCreate({ name: 'New', emoji: '🍎', calories: 100, protein: 5, carbs: 15, fat: 2 })}>
+        Create meal
+      </button>
+      <button onClick={() => onMealUpdate(1, { name: 'Updated', emoji: '🥑', calories: 200, protein: 10, carbs: 20, fat: 5 })}>
+        Update meal
+      </button>
+      <button onClick={() => onMealDelete(1)}>Delete meal</button>
     </div>
   ),
 }))
@@ -59,6 +78,9 @@ function planWithMeal(day: string, mealType: string, meal: Meal) {
 beforeEach(() => {
   vi.clearAllMocks()
   vi.mocked(mealsApi.getAll).mockResolvedValue(sampleMeals)
+  vi.mocked(mealsApi.create).mockResolvedValue({ id: 100, name: 'New', emoji: '🍎', calories: 100, protein: 5, carbs: 15, fat: 2 })
+  vi.mocked(mealsApi.update).mockResolvedValue({ id: 1, name: 'Updated', emoji: '🥑', calories: 200, protein: 10, carbs: 20, fat: 5 })
+  vi.mocked(mealsApi.delete).mockResolvedValue({ message: 'Meal deleted' })
   vi.mocked(planApi.getWeek).mockResolvedValue([])
   vi.mocked(planApi.setSlot).mockResolvedValue({} as MealEntryResponse)
   vi.mocked(planApi.clearSlot).mockResolvedValue({ message: 'cleared' })
@@ -264,6 +286,40 @@ describe('PlannerPage generate button', () => {
     fireEvent.click(screen.getByRole('button', { name: /Generate week/i }))
     await waitFor(() => {
       expect(screen.getByText(/VITE_ANTHROPIC_API_KEY/i)).toBeInTheDocument()
+    })
+  })
+})
+
+describe('PlannerPage meal library management', () => {
+  it('calls mealsApi.create when the picker triggers onMealCreate', async () => {
+    await renderAndWait()
+    fireEvent.click(screen.getAllByRole('button', { name: '+' })[0])
+    fireEvent.click(screen.getByRole('button', { name: 'Create meal' }))
+    await waitFor(() => {
+      expect(mealsApi.create).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'New', emoji: '🍎' })
+      )
+    })
+  })
+
+  it('calls mealsApi.update when the picker triggers onMealUpdate', async () => {
+    await renderAndWait()
+    fireEvent.click(screen.getAllByRole('button', { name: '+' })[0])
+    fireEvent.click(screen.getByRole('button', { name: 'Update meal' }))
+    await waitFor(() => {
+      expect(mealsApi.update).toHaveBeenCalledWith(
+        1,
+        expect.objectContaining({ name: 'Updated' })
+      )
+    })
+  })
+
+  it('calls mealsApi.delete when the picker triggers onMealDelete', async () => {
+    await renderAndWait()
+    fireEvent.click(screen.getAllByRole('button', { name: '+' })[0])
+    fireEvent.click(screen.getByRole('button', { name: 'Delete meal' }))
+    await waitFor(() => {
+      expect(mealsApi.delete).toHaveBeenCalledWith(1)
     })
   })
 })

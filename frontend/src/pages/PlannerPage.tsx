@@ -92,6 +92,39 @@ export default function PlannerPage() {
     setPicker(null);
   };
 
+  const handleMealCreate = useCallback(async (data: Omit<Meal, "id">) => {
+    const newMeal = await mealsApi.create(data);
+    setMealLibrary((prev) => [...prev, newMeal]);
+  }, []);
+
+  const handleMealUpdate = useCallback(async (id: number, data: Omit<Meal, "id">) => {
+    const updated = await mealsApi.update(id, data);
+    setMealLibrary((prev) => prev.map((m) => (m.id === id ? updated : m)));
+    setPlan((prev) => {
+      const next = { ...prev };
+      for (const d of DAYS) {
+        for (const mt of MEAL_TYPES) {
+          if (next[d][mt]?.id === id) next[d] = { ...next[d], [mt]: updated };
+        }
+      }
+      return next;
+    });
+  }, []);
+
+  const handleMealDelete = useCallback(async (id: number) => {
+    await mealsApi.delete(id);
+    setMealLibrary((prev) => prev.filter((m) => m.id !== id));
+    setPlan((prev) => {
+      const next = { ...prev };
+      for (const d of DAYS) {
+        for (const mt of MEAL_TYPES) {
+          if (next[d][mt]?.id === id) next[d] = { ...next[d], [mt]: null };
+        }
+      }
+      return next;
+    });
+  }, []);
+
   // ── AI generation ─────────────────────────────────────────────────────────────
   const generateWeek = async () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -322,6 +355,9 @@ Respond ONLY with valid JSON: {"Mon":{"Breakfast":7,"Lunch":3,"Dinner":5,"Snack"
           meals={mealLibrary}
           onSelect={handlePickerSelect}
           onClose={() => setPicker(null)}
+          onMealCreate={handleMealCreate}
+          onMealUpdate={handleMealUpdate}
+          onMealDelete={handleMealDelete}
         />
       )}
     </div>

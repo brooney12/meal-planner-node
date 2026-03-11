@@ -142,6 +142,75 @@ describe('mealsApi.getAll', () => {
   })
 })
 
+describe('mealsApi.create', () => {
+  beforeEach(() => { localStorage.setItem('mp_token', 'test-token') })
+
+  it('sends a POST and returns the created meal', async () => {
+    const newMeal: Meal = { id: 15, name: 'Tuna Bowl', emoji: '🐟', calories: 420, protein: 38, carbs: 30, fat: 12 }
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 201, json: async () => newMeal,
+    }))
+    const { id: _id, ...data } = newMeal
+    expect(await mealsApi.create(data)).toEqual(newMeal)
+    const call = (fetch as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(call[1].method).toBe('POST')
+    expect(JSON.parse(call[1].body)).toMatchObject(data)
+  })
+
+  it('throws when the server returns an error', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false, status: 400, json: async () => ({ error: 'Validation failed' }),
+    }))
+    await expect(mealsApi.create({ name: '', emoji: '', calories: 0, protein: 0, carbs: 0, fat: 0 }))
+      .rejects.toThrow('Validation failed')
+  })
+})
+
+describe('mealsApi.update', () => {
+  beforeEach(() => { localStorage.setItem('mp_token', 'test-token') })
+
+  it('sends a PUT to /meals/:id and returns the updated meal', async () => {
+    const updated: Meal = { id: 1, name: 'Updated Oats', emoji: '🥣', calories: 310, protein: 11, carbs: 50, fat: 5 }
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, json: async () => updated,
+    }))
+    const { id: _id, ...data } = updated
+    expect(await mealsApi.update(1, data)).toEqual(updated)
+    const call = (fetch as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(call[0]).toContain('/meals/1')
+    expect(call[1].method).toBe('PUT')
+  })
+
+  it('throws on server error', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false, status: 404, json: async () => ({ error: 'Meal not found' }),
+    }))
+    await expect(mealsApi.update(99, { name: 'X', emoji: '🍎', calories: 0, protein: 0, carbs: 0, fat: 0 }))
+      .rejects.toThrow('Meal not found')
+  })
+})
+
+describe('mealsApi.delete', () => {
+  beforeEach(() => { localStorage.setItem('mp_token', 'test-token') })
+
+  it('sends a DELETE to /meals/:id and returns the success message', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200, json: async () => ({ message: 'Meal deleted' }),
+    }))
+    expect(await mealsApi.delete(1)).toEqual({ message: 'Meal deleted' })
+    const call = (fetch as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(call[0]).toContain('/meals/1')
+    expect(call[1].method).toBe('DELETE')
+  })
+
+  it('throws on server error', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false, status: 404, json: async () => ({ error: 'Meal not found' }),
+    }))
+    await expect(mealsApi.delete(99)).rejects.toThrow('Meal not found')
+  })
+})
+
 // ── planApi ───────────────────────────────────────────────────────────────────
 describe('planApi', () => {
   const meal: Meal = { id: 1, name: 'Oats', emoji: '🥣', calories: 300, protein: 10, carbs: 50, fat: 5 }

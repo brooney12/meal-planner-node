@@ -57,6 +57,9 @@ export const authApi = {
 // ── Meals ─────────────────────────────────────────────────────────────────────
 export const mealsApi = {
   getAll: (): Promise<Meal[]> => request<Meal[]>("GET", "/meals"),
+  create: (data: Omit<Meal, "id">): Promise<Meal> => request<Meal>("POST", "/meals", data),
+  update: (id: number, data: Omit<Meal, "id">): Promise<Meal> => request<Meal>("PUT", `/meals/${id}`, data),
+  delete: (id: number): Promise<{ message: string }> => request<{ message: string }>("DELETE", `/meals/${id}`),
 };
 
 // ── Meal Plan ─────────────────────────────────────────────────────────────────
