@@ -53,7 +53,9 @@ function MacroBar({ label, value, max, color }: { label: string; value: number; 
 
 interface SlotTarget { day: DayOfWeek; mealType: MealType }
 
-export default function PlannerPage() {
+interface PlannerPageProps { mealRefreshKey?: number; }
+
+export default function PlannerPage({ mealRefreshKey = 0 }: PlannerPageProps) {
   const [weekLabel, setWeekLabel] = useState(getCurrentWeekLabel);
   const [plan, setPlan] = useState<WeekPlan>(emptyWeekPlan);
   const [mealLibrary, setMealLibrary] = useState<Meal[]>([]);
@@ -63,7 +65,7 @@ export default function PlannerPage() {
   const [generating, setGenerating] = useState(false);
   const [genError, setGenError] = useState<string | null>(null);
 
-  useEffect(() => { mealsApi.getAll().then(setMealLibrary).catch(() => {}); }, []);
+  useEffect(() => { mealsApi.getAll().then(setMealLibrary).catch(() => {}); }, [mealRefreshKey]);
 
   const loadWeek = useCallback(async (label: string) => {
     setLoading(true);
