@@ -31,7 +31,7 @@ export default function AuthPage() {
   return (
     <div className={styles.wrapper}>
       <div className={styles.card}>
-        <h1 className={styles.title}>🥗 Meal Planner</h1>
+        <h1 className={styles.title}> Meal Planner</h1>
 
         <div className={styles.tabs}>
           <button

@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
+import { logger } from "../config/logger";
 
 const JWT_SECRET = process.env.JWT_SECRET ?? "changeme";
 
@@ -17,6 +18,7 @@ export function generateToken(payload: JwtPayload): string {
 export function authenticate(req: Request, res: Response, next: NextFunction): void {
   const header = req.headers.authorization;
   if (!header?.startsWith("Bearer ")) {
+    logger.warn("Auth failed: no token provided", { url: req.url });
     res.status(401).json({ error: "No token provided" });
     return;
   }
@@ -27,6 +29,7 @@ export function authenticate(req: Request, res: Response, next: NextFunction): v
     req.user = { id: decoded.id, username: decoded.username };
     next();
   } catch {
+    logger.warn("Auth failed: invalid or expired token", { url: req.url });
     res.status(401).json({ error: "Invalid or expired token" });
   }
 }

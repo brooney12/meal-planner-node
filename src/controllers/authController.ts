@@ -4,6 +4,7 @@ import { z } from "zod";
 import { db } from "../config/database";
 import { generateToken } from "../middleware/auth";
 import { User } from "../types";
+import { logger } from "../config/logger";
 
 const RegisterSchema = z.object({
   username: z.string().min(3).max(30),
@@ -30,6 +31,7 @@ export async function register(req: Request, res: Response): Promise<void> {
     .get(username, email) as User | undefined;
 
   if (existing) {
+    logger.warn("Registration failed: username or email already taken", { username, email });
     res.status(409).json({ error: "Username or email already taken" });
     return;
   }
@@ -39,6 +41,7 @@ export async function register(req: Request, res: Response): Promise<void> {
     .prepare("INSERT INTO users (username, email, password) VALUES (?, ?, ?)")
     .run(username, email, hashed);
 
+  logger.info("User registered", { userId: result.lastInsertRowid, username });
   const token = generateToken({ id: result.lastInsertRowid as number, username });
   res.status(201).json({ token, username });
 }
@@ -56,10 +59,12 @@ export async function login(req: Request, res: Response): Promise<void> {
     .get(username) as User | undefined;
 
   if (!user || !(await bcrypt.compare(password, user.password))) {
+    logger.warn("Login failed: invalid credentials", { username });
     res.status(401).json({ error: "Invalid username or password" });
     return;
   }
 
+  logger.info("User logged in", { userId: user.id, username: user.username });
   const token = generateToken({ id: user.id, username: user.username });
   res.json({ token, username: user.username });
 }

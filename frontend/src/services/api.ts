@@ -1,5 +1,6 @@
 // src/services/api.ts
 import type { AuthResponse, Meal, MealEntryResponse, DayOfWeek, MealType } from "../types";
+import { logger } from "../utils/logger";
 
 const BASE = "http://localhost:8080/api";
 
@@ -12,6 +13,8 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   const token = getToken();
   if (token) headers["Authorization"] = `Bearer ${token}`;
 
+  logger.debug(`API ${method} ${path}`, body !== undefined ? { body } : undefined);
+
   const res = await fetch(`${BASE}${path}`, {
     method,
     headers,
@@ -19,6 +22,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   });
 
   if (res.status === 401) {
+    logger.warn(`API ${method} ${path} → 401 Unauthorized`);
     localStorage.removeItem("mp_token");
     localStorage.removeItem("mp_username");
     window.location.href = "/login";
@@ -26,7 +30,13 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   }
 
   const data = await res.json();
-  if (!res.ok) throw new Error((data as { error: string }).error ?? "Request failed");
+  if (!res.ok) {
+    const message = (data as { error: string }).error ?? "Request failed";
+    logger.error(`API ${method} ${path} → ${res.status}`, { message });
+    throw new Error(message);
+  }
+
+  logger.debug(`API ${method} ${path} → ${res.status}`);
   return data as T;
 }
 

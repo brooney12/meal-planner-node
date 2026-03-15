@@ -2,6 +2,7 @@ import Database, { Database as DatabaseType } from "better-sqlite3";
 import path from "path";
 import fs from "fs";
 import dotenv from "dotenv";
+import { logger } from "./logger";
 
 dotenv.config();
 
@@ -10,6 +11,7 @@ const dir = path.dirname(dbPath);
 if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
 export const db: DatabaseType = new Database(dbPath);
+logger.debug("Database connected", { path: dbPath });
 
 // Enable WAL mode for better concurrent read performance
 db.pragma("journal_mode = WAL");

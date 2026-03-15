@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import { z } from "zod";
 import { db } from "../config/database";
 import { Meal, MealEntry } from "../types";
+import { logger } from "../config/logger";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -94,6 +95,7 @@ export function setSlot(req: Request, res: Response): void {
   ).run(userId, dayOfWeek, mealType, weekLabel);
 
   if (mealId === null) {
+    logger.debug("Slot cleared", { userId, dayOfWeek, mealType, weekLabel });
     res.json({ message: "Slot cleared" });
     return;
   }
@@ -165,5 +167,6 @@ export function bulkSetWeek(req: Request, res: Response): void {
   });
 
   run();
+  logger.info("Bulk week set", { userId, weekLabel, count: results.length });
   res.json(results);
 }
