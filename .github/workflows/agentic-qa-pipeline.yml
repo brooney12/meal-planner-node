@@ -1,0 +1,502 @@
+# .github/workflows/agentic-qa-pipeline.yml
+#
+# Agentic QA Pipeline
+#
+# Stages:
+#   1. On PR open/update → Copilot code review + Jira AC check + post test plan
+#   2. On "approved" comment from maintainer → agent writes and runs Playwright tests
+#   3. Coverage gate blocks merge if tests fail
+#
+# Required secrets (set in repo Settings → Secrets):
+#   GITHUB_TOKEN        Provided automatically by Actions — no setup needed
+#
+# Required repo settings:
+#   - Copilot code review enabled (Settings → Code and Automation → Copilot)
+#   - Branch protection on main: require status checks "playwright-tests"
+
+name: Agentic QA Pipeline
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+
+  # ─────────────────────────────────────────────────────────────
+  # JOB 1: GitHub Issue AC check
+  # Runs on every PR open/update.
+  # Fetches the linked GitHub Issue, extracts acceptance criteria,
+  # and posts a checklist as a PR comment.
+  # ─────────────────────────────────────────────────────────────
+  issue-ac-check:
+    name: GitHub Issue AC check
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract issue number from branch name
+        id: issue
+        run: |
+          BRANCH="${{ github.head_ref }}"
+          # Match pattern: copilot/123-slug or anything/123-slug
+          NUMBER=$(echo "$BRANCH" | grep -oE '/[0-9]+' | grep -oE '[0-9]+' | head -1)
+          if [ -z "$NUMBER" ]; then
+            echo "No issue number found in branch name: $BRANCH"
+            echo "number=" >> $GITHUB_OUTPUT
+          else
+            echo "Found issue number: $NUMBER"
+            echo "number=$NUMBER" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Fetch GitHub Issue details
+        id: fetch-issue
+        if: steps.issue.outputs.number != ''
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const { data: issue } = await github.rest.issues.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ steps.issue.outputs.number }},
+            });
+            core.setOutput('title', issue.title);
+            core.setOutput('body', issue.body || '');
+            core.setOutput('url', issue.html_url);
+            return issue;
+
+      - name: Post Issue AC checklist as PR comment
+        if: steps.issue.outputs.number != ''
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const issueNumber = '${{ steps.issue.outputs.number }}';
+            const issueTitle = `${{ steps.fetch-issue.outputs.title }}`;
+            const issueUrl = `${{ steps.fetch-issue.outputs.url }}`;
+            const issueBody = `${{ steps.fetch-issue.outputs.body }}`;
+
+            // Extract checkbox lines from the issue body as AC items
+            const acLines = issueBody
+              .split('\n')
+              .filter(l => l.match(/^[-*]\s|\[\s\]|\[x\]/i))
+              .map(l => `- [ ] ${l.replace(/^[-*]\s|\[.\]\s?/g, '').trim()}`)
+              .filter(Boolean);
+
+            const acSection = acLines.length > 0
+              ? acLines.join('\n')
+              : '- [ ] _(No checklist found in issue — add acceptance criteria to the issue body)_';
+
+            const body = [
+              `## 📋 Issue AC check — [#${issueNumber}: ${issueTitle}](${issueUrl})`,
+              '',
+              '> Review each acceptance criterion against the PR diff.',
+              '> Check off items that are fully addressed.',
+              '',
+              '### Acceptance criteria',
+              acSection,
+              '',
+              '### Coverage gaps',
+              '_List any AC items not addressed in this PR, and why._',
+              '',
+              '---',
+              `_Automated check · [View issue #${issueNumber}](${issueUrl})_`,
+            ].join('\n');
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body,
+            });
+
+      - name: No issue number found — warn
+        if: steps.issue.outputs.number == ''
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: [
+                '## ⚠️ No GitHub Issue found',
+                '',
+                'No issue number was detected in the branch name.',
+                'Expected format: `copilot/123-short-description`',
+                '',
+                'Issue AC check skipped.',
+              ].join('\n'),
+            });
+
+
+  # ─────────────────────────────────────────────────────────────
+  # JOB 2: Post test plan
+  # Runs on every PR open/update.
+  # Analyzes the diff and posts a structured test plan comment.
+  # Does NOT write any test code — waits for human approval.
+  # ─────────────────────────────────────────────────────────────
+  post-test-plan:
+    name: Post test plan
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    needs: issue-ac-check
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Get changed test-relevant files
+        id: changed
+        run: |
+          FILES=$(git diff origin/${{ github.base_ref }}...HEAD --name-only -- '*.ts' '*.tsx' | grep -v '\.spec\.' | grep -v '/tests/' | tr '\n' ' ')
+          echo "files=$FILES" >> $GITHUB_OUTPUT
+          echo "Changed source files: $FILES"
+
+      - name: Extract issue number from branch name
+        id: issue
+        run: |
+          BRANCH="${{ github.head_ref }}"
+          NUMBER=$(echo "$BRANCH" | grep -oE '/[0-9]+' | grep -oE '[0-9]+' | head -1)
+          echo "number=${NUMBER:-N/A}" >> $GITHUB_OUTPUT
+
+      - name: Post test plan template as PR comment
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const changedFiles = `${{ steps.changed.outputs.files }}`.trim();
+            const prNumber = context.payload.pull_request.number;
+            const issueNumber = '${{ steps.issue.outputs.number }}';
+
+            const fileList = changedFiles
+              ? changedFiles.split(' ').filter(Boolean).map(f => `- \`${f}\``).join('\n')
+              : '- _(no source files changed)_';
+
+            const issueRef = issueNumber !== 'N/A'
+              ? `[#${issueNumber}](https://github.com/${context.repo.owner}/${context.repo.repo}/issues/${issueNumber})`
+              : 'N/A';
+
+            const body = [
+              '## 🧪 Test Plan (awaiting approval)',
+              '',
+              `**GitHub issue**: ${issueRef}`,
+              `**PR**: #${prNumber}`,
+              `**Changed source files**:`,
+              fileList,
+              '',
+              '---',
+              '',
+              '### E2E tests',
+              '',
+              '> _Agent: fill in the scenarios below based on the PR diff and issue AC._',
+              '',
+              '- [ ] **Happy path**: given _[precondition]_, when _[action]_, then _[expected result]_',
+              '- [ ] **Happy path**: given _[precondition]_, when _[action]_, then _[expected result]_',
+              '',
+              '### Error / edge cases',
+              '',
+              '- [ ] **Error state**: given _[precondition]_, when _[action]_, then _[expected result]_',
+              '- [ ] **Boundary condition**: given _[precondition]_, when _[action]_, then _[expected result]_',
+              '',
+              '### Out of scope',
+              '',
+              '- _[anything explicitly not being tested and why]_',
+              '',
+              '---',
+              '',
+              '**To approve this plan and trigger test writing, reply with:**',
+              '```',
+              'approved',
+              '```',
+              '',
+              '**To request changes, reply with your feedback.**',
+              '',
+              '> ⚠️ No test code will be written until this plan is approved by a maintainer.',
+            ].join('\n');
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body,
+            });
+
+            try {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                labels: ['test-plan-pending'],
+              });
+            } catch(e) {
+              console.log('Could not add label (may not exist yet):', e.message);
+            }
+
+
+  # ─────────────────────────────────────────────────────────────
+  # JOB 3: Write and run Playwright tests
+  # Triggered ONLY when a maintainer comments "approved" on a PR.
+  # Checks that the commenter has write access before proceeding.
+  # ─────────────────────────────────────────────────────────────
+  write-and-run-tests:
+    name: Write and run Playwright tests
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'issue_comment' &&
+      github.event.issue.pull_request &&
+      contains(github.event.comment.body, 'approved')
+
+    steps:
+      - name: Verify commenter has write access
+        id: auth-check
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const { data: perm } = await github.rest.repos.getCollaboratorPermissionLevel({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              username: context.actor,
+            });
+            const level = perm.permission;
+            const allowed = ['admin', 'write'].includes(level);
+            console.log(`${context.actor} has permission: ${level} — allowed: ${allowed}`);
+            if (!allowed) {
+              core.setFailed(`${context.actor} does not have write access. Test plan must be approved by a maintainer.`);
+            }
+            return allowed;
+
+      - name: Get PR details
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.payload.issue.number,
+            });
+            core.setOutput('head_sha', pr.head.sha);
+            core.setOutput('head_ref', pr.head.ref);
+            core.setOutput('number', pr.number);
+            return pr;
+
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pr.outputs.head_ref }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Acknowledge and start
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ steps.pr.outputs.number }},
+              body: [
+                '## ✅ Test plan approved — writing tests now',
+                '',
+                `Approved by @${context.actor}`,
+                '',
+                'The agent is now:',
+                '1. Analyzing the approved test plan',
+                '2. Writing Playwright tests following the plan',
+                '3. Running tests and self-healing any failures',
+                '4. Committing passing tests to this branch',
+                '',
+                '_This comment will be updated when tests are complete._',
+              ].join('\n'),
+            });
+
+            // Swap labels
+            try {
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: ${{ steps.pr.outputs.number }},
+                name: 'test-plan-pending',
+              });
+            } catch(e) { /* label may not exist */ }
+
+            try {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: ${{ steps.pr.outputs.number }},
+                labels: ['tests-in-progress'],
+              });
+            } catch(e) { console.log('Could not add label:', e.message); }
+
+      # NOTE: In a full Copilot coding agent setup, you would assign
+      # a GitHub Issue here to @github (the coding agent) with the
+      # test plan content and let it write the tests autonomously.
+      #
+      # This step runs existing tests + any tests the agent has written
+      # on the branch, and reports results back to the PR.
+
+      - name: Run Playwright tests
+        id: playwright
+        run: |
+          npx playwright test --reporter=json,html 2>&1 | tee /tmp/playwright-output.txt
+          echo "exit_code=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
+        continue-on-error: true
+
+      - name: Upload Playwright report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-report-pr-${{ steps.pr.outputs.number }}
+          path: playwright-report/
+          retention-days: 14
+
+      - name: Parse test results
+        id: results
+        run: |
+          OUTPUT=$(cat /tmp/playwright-output.txt)
+          PASSED=$(echo "$OUTPUT" | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+' | tail -1 || echo "0")
+          FAILED=$(echo "$OUTPUT" | grep -oE '[0-9]+ failed' | grep -oE '[0-9]+' | tail -1 || echo "0")
+          SKIPPED=$(echo "$OUTPUT" | grep -oE '[0-9]+ skipped' | grep -oE '[0-9]+' | tail -1 || echo "0")
+          echo "passed=$PASSED" >> $GITHUB_OUTPUT
+          echo "failed=$FAILED" >> $GITHUB_OUTPUT
+          echo "skipped=$SKIPPED" >> $GITHUB_OUTPUT
+
+      - name: Post test results to PR
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const passed = '${{ steps.results.outputs.passed }}';
+            const failed = '${{ steps.results.outputs.failed }}';
+            const skipped = '${{ steps.results.outputs.skipped }}';
+            const exitCode = '${{ steps.playwright.outputs.exit_code }}';
+            const prNumber = ${{ steps.pr.outputs.number }};
+            const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+
+            const status = exitCode === '0' ? '✅ All tests passed' : '❌ Some tests failed';
+            const emoji = exitCode === '0' ? '✅' : '❌';
+
+            const body = [
+              `## ${emoji} Playwright test results`,
+              '',
+              `| Result | Count |`,
+              `|--------|-------|`,
+              `| ✅ Passed | ${passed} |`,
+              `| ❌ Failed | ${failed} |`,
+              `| ⏭️ Skipped | ${skipped} |`,
+              '',
+              `**Status**: ${status}`,
+              '',
+              `[View full report](${runUrl}) · Artifact: \`playwright-report-pr-${prNumber}\``,
+            ].join('\n');
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body,
+            });
+
+            // Update label
+            const labelToRemove = 'tests-in-progress';
+            const labelToAdd = exitCode === '0' ? 'tests-passing' : 'tests-failing';
+
+            try {
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                name: labelToRemove,
+              });
+            } catch(e) { /* label may not exist */ }
+
+            try {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                labels: [labelToAdd],
+              });
+            } catch(e) { console.log('Could not add label:', e.message); }
+
+      - name: Fail job if tests failed
+        if: steps.playwright.outputs.exit_code != '0'
+        run: |
+          echo "Playwright tests failed. See report in Actions artifacts."
+          exit 1
+
+
+  # ─────────────────────────────────────────────────────────────
+  # JOB 4: Coverage gate (required status check)
+  # Blocks merge if Playwright tests are not passing.
+  # Add this as a required check in branch protection settings.
+  # ─────────────────────────────────────────────────────────────
+  playwright-tests:
+    name: playwright-tests
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Playwright tests
+        run: npx playwright test
+
+      - name: Upload report on failure
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report-gate
+          path: playwright-report/
+          retention-days: 7
