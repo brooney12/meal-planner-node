@@ -3,16 +3,17 @@
 # Agentic QA Pipeline
 #
 # Stages:
-#   1. On PR open/update → Copilot code review + Jira AC check + post test plan
+#   1. On PR open/update → AI-powered AC check via GitHub Models + post test plan
 #   2. On "approved" comment from maintainer → agent writes and runs Playwright tests
 #   3. Coverage gate blocks merge if tests fail
 #
-# Required secrets (set in repo Settings → Secrets):
-#   GITHUB_TOKEN        Provided automatically by Actions — no setup needed
+# Required secrets:
+#   GITHUB_TOKEN   Provided automatically by Actions — no setup needed
 #
 # Required repo settings:
 #   - Copilot code review enabled (Settings → Code and Automation → Copilot)
-#   - Branch protection on main: require status checks "playwright-tests"
+#   - Copilot plan with GitHub Models access
+#   - Branch protection on main: require status checks "issue-ac-check" and "playwright-tests"
 
 name: Agentic QA Pipeline
 
@@ -30,10 +31,15 @@ permissions:
 jobs:
 
   # ─────────────────────────────────────────────────────────────
-  # JOB 1: GitHub Issue AC check
+  # JOB 1: GitHub Issue AC check (AI-powered via GitHub Models)
   # Runs on every PR open/update.
   # Fetches the linked GitHub Issue, extracts acceptance criteria,
-  # and posts a checklist as a PR comment.
+  # diffs them against the PR changes using GitHub Models (gpt-4o),
+  # and posts a fully auto-checked coverage report as a PR comment.
+  # Fails the check if any ACs are missing — blocks merge.
+  #
+  # No extra secrets needed — uses GITHUB_TOKEN throughout.
+  # Requires: GitHub Copilot plan with access to GitHub Models.
   # ─────────────────────────────────────────────────────────────
   issue-ac-check:
     name: GitHub Issue AC check
@@ -50,7 +56,6 @@ jobs:
         id: issue
         run: |
           BRANCH="${{ github.head_ref }}"
-          # Match pattern: copilot/123-slug or anything/123-slug
           NUMBER=$(echo "$BRANCH" | grep -oE '/[0-9]+' | grep -oE '[0-9]+' | head -1)
           if [ -z "$NUMBER" ]; then
             echo "No issue number found in branch name: $BRANCH"
@@ -60,67 +65,186 @@ jobs:
             echo "number=$NUMBER" >> $GITHUB_OUTPUT
           fi
 
-      - name: Fetch GitHub Issue details
-        id: fetch-issue
+      - name: Fetch issue and PR diff
+        id: fetch
         if: steps.issue.outputs.number != ''
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
+            // Fetch the linked GitHub Issue
             const { data: issue } = await github.rest.issues.get({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              issue_number: ${{ steps.issue.outputs.number }},
+              issue_number: parseInt('${{ steps.issue.outputs.number }}'),
             });
-            core.setOutput('title', issue.title);
-            core.setOutput('body', issue.body || '');
-            core.setOutput('url', issue.html_url);
-            return issue;
 
-      - name: Post Issue AC checklist as PR comment
+            // Fetch the PR diff — limited to 8k chars to stay within model context
+            const { data: diff } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.payload.pull_request.number,
+              mediaType: { format: 'diff' },
+            });
+
+            const diffText = typeof diff === 'string'
+              ? diff.slice(0, 8000)
+              : JSON.stringify(diff).slice(0, 8000);
+
+            core.setOutput('issue_number', issue.number);
+            core.setOutput('issue_title', issue.title);
+            core.setOutput('issue_url', issue.html_url);
+            core.setOutput('issue_body', (issue.body || '').slice(0, 4000));
+            core.setOutput('pr_diff', diffText);
+
+      - name: Analyse AC coverage with GitHub Models
+        id: ai-check
         if: steps.issue.outputs.number != ''
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const issueNumber = '${{ steps.issue.outputs.number }}';
-            const issueTitle = `${{ steps.fetch-issue.outputs.title }}`;
-            const issueUrl = `${{ steps.fetch-issue.outputs.url }}`;
-            const issueBody = `${{ steps.fetch-issue.outputs.body }}`;
+            const issueBody = `${{ steps.fetch.outputs.issue_body }}`;
+            const prDiff   = `${{ steps.fetch.outputs.pr_diff }}`;
 
-            // Extract checkbox lines from the issue body as AC items
-            const acLines = issueBody
-              .split('\n')
-              .filter(l => l.match(/^[-*]\s|\[\s\]|\[x\]/i))
-              .map(l => `- [ ] ${l.replace(/^[-*]\s|\[.\]\s?/g, '').trim()}`)
-              .filter(Boolean);
+            const prompt = `You are a QA engineer reviewing a pull request against a GitHub Issue.
 
-            const acSection = acLines.length > 0
-              ? acLines.join('\n')
-              : '- [ ] _(No checklist found in issue — add acceptance criteria to the issue body)_';
+## GitHub Issue body
+${issueBody}
+
+## PR diff (truncated to 8000 chars)
+${prDiff}
+
+## Your task
+1. Extract every acceptance criterion (AC) from the issue body.
+   Look for bullet points, numbered lists, checkboxes (- [ ]), or any
+   sentence that describes expected behaviour.
+2. For each AC, decide: COVERED, PARTIAL, or MISSING — based solely
+   on what you can see in the diff.
+3. Return ONLY a JSON array. No explanation, no markdown fences.
+
+Schema:
+[
+  {
+    "ac": "<exact AC text from the issue>",
+    "status": "COVERED" | "PARTIAL" | "MISSING",
+    "reason": "<one sentence explaining your decision>"
+  }
+]
+
+If no ACs are found in the issue, return:
+[{"ac": "No acceptance criteria found in issue body", "status": "MISSING", "reason": "Add acceptance criteria to the GitHub Issue."}]`;
+
+            // GitHub Models uses an OpenAI-compatible endpoint, authenticated
+            // with the standard GITHUB_TOKEN — no extra secrets required.
+            const response = await fetch(
+              'https://models.inference.ai.azure.com/chat/completions',
+              {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Authorization': `Bearer ${process.env.GITHUB_TOKEN}`,
+                },
+                body: JSON.stringify({
+                  model: 'gpt-4o',
+                  messages: [{ role: 'user', content: prompt }],
+                  temperature: 0,
+                  max_tokens: 1500,
+                }),
+              }
+            );
+
+            if (!response.ok) {
+              const err = await response.text();
+              core.setFailed(`GitHub Models API error: ${response.status} — ${err}`);
+              return;
+            }
+
+            const data = await response.json();
+            const raw = data.choices?.[0]?.message?.content || '[]';
+
+            // Strip accidental markdown fences before parsing
+            const cleaned = raw.replace(/```json|```/g, '').trim();
+
+            let results = [];
+            try {
+              results = JSON.parse(cleaned);
+            } catch(e) {
+              core.warning(`Could not parse model response as JSON: ${cleaned}`);
+              results = [{
+                ac: 'AC analysis failed — model returned unexpected output',
+                status: 'MISSING',
+                reason: 'Check the Actions log for the raw model response.',
+              }];
+            }
+
+            core.setOutput('results', JSON.stringify(results));
+            console.log('AC analysis:', JSON.stringify(results, null, 2));
+
+      - name: Post AC coverage report as PR comment
+        if: steps.issue.outputs.number != ''
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const issueNumber = '${{ steps.fetch.outputs.issue_number }}';
+            const issueTitle  = `${{ steps.fetch.outputs.issue_title }}`;
+            const issueUrl    = `${{ steps.fetch.outputs.issue_url }}`;
+            const prNumber    = context.payload.pull_request.number;
+
+            let results = [];
+            try {
+              results = JSON.parse(`${{ steps.ai-check.outputs.results }}`);
+            } catch(e) { results = []; }
+
+            const icon = s =>
+              s === 'COVERED' ? '✅' : s === 'PARTIAL' ? '⚠️' : '❌';
+
+            const covered = results.filter(r => r.status === 'COVERED').length;
+            const partial = results.filter(r => r.status === 'PARTIAL').length;
+            const missing = results.filter(r => r.status === 'MISSING').length;
+            const total   = results.length;
+
+            const summary = total === 0
+              ? '⚠️ No acceptance criteria found in the issue.'
+              : missing === 0 && partial === 0
+                ? `✅ All ${total} acceptance criteria covered.`
+                : `${covered}/${total} covered · ${partial} partial · ${missing} missing`;
+
+            const rows = results.map(r =>
+              `| ${icon(r.status)} **${r.status}** | ${r.ac} | ${r.reason} |`
+            ).join('\n');
 
             const body = [
-              `## 📋 Issue AC check — [#${issueNumber}: ${issueTitle}](${issueUrl})`,
+              `## 📋 AC coverage — [#${issueNumber}: ${issueTitle}](${issueUrl})`,
               '',
-              '> Review each acceptance criterion against the PR diff.',
-              '> Check off items that are fully addressed.',
+              `**${summary}**`,
               '',
-              '### Acceptance criteria',
-              acSection,
+              '| Status | Acceptance criterion | Reasoning |',
+              '|--------|----------------------|-----------|',
+              rows,
               '',
-              '### Coverage gaps',
-              '_List any AC items not addressed in this PR, and why._',
+              '> _Analysed automatically using GitHub Models (gpt-4o)._',
+              '> _Review the reasoning above before approving the test plan._',
               '',
               '---',
-              `_Automated check · [View issue #${issueNumber}](${issueUrl})_`,
+              `_[View issue #${issueNumber}](${issueUrl})_`,
             ].join('\n');
 
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              issue_number: context.payload.pull_request.number,
+              issue_number: prNumber,
               body,
             });
+
+            // Fail the check if any ACs are missing — this blocks merge
+            // when issue-ac-check is added as a required status check.
+            if (missing > 0) {
+              core.setFailed(
+                `${missing} acceptance criteri${missing === 1 ? 'on' : 'a'} not covered by this PR.`
+              );
+            }
 
       - name: No issue number found — warn
         if: steps.issue.outputs.number == ''
@@ -347,7 +471,6 @@ jobs:
               ].join('\n'),
             });
 
-            // Swap labels
             try {
               await github.rest.issues.removeLabel({
                 owner: context.repo.owner,
@@ -365,13 +488,6 @@ jobs:
                 labels: ['tests-in-progress'],
               });
             } catch(e) { console.log('Could not add label:', e.message); }
-
-      # NOTE: In a full Copilot coding agent setup, you would assign
-      # a GitHub Issue here to @github (the coding agent) with the
-      # test plan content and let it write the tests autonomously.
-      #
-      # This step runs existing tests + any tests the agent has written
-      # on the branch, and reports results back to the PR.
 
       - name: Run Playwright tests
         id: playwright
@@ -411,8 +527,8 @@ jobs:
             const prNumber = ${{ steps.pr.outputs.number }};
             const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
 
-            const status = exitCode === '0' ? '✅ All tests passed' : '❌ Some tests failed';
             const emoji = exitCode === '0' ? '✅' : '❌';
+            const status = exitCode === '0' ? 'All tests passed' : 'Some tests failed';
 
             const body = [
               `## ${emoji} Playwright test results`,
@@ -435,7 +551,6 @@ jobs:
               body,
             });
 
-            // Update label
             const labelToRemove = 'tests-in-progress';
             const labelToAdd = exitCode === '0' ? 'tests-passing' : 'tests-failing';
 
@@ -467,7 +582,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────
   # JOB 4: Coverage gate (required status check)
   # Blocks merge if Playwright tests are not passing.
-  # Add this as a required check in branch protection settings.
+  # Add "playwright-tests" as a required check in branch protection.
   # ─────────────────────────────────────────────────────────────
   playwright-tests:
     name: playwright-tests
