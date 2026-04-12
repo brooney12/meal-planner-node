@@ -136,54 +136,6 @@ jobs:
       - name: Analyse AC coverage with GitHub Models
         id: ai-check
         if: steps.issue.outputs.number != ''
-        uses: actions/ai-inference@v1.2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          model: openai/gpt-4o
-          prompt-file: /tmp/ac-prompt.txt
-
-      - name: Validate and parse model response
-        id: ai-results
-        if: steps.issue.outputs.number != ''
-        uses: actions/github-script@v7
-        env:
-          MODEL_RAW: ${{ steps.ai-check.outputs.response }}
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const fs = require('fs');
-            const issueBody = process.env.ISSUE_BODY || '';
-            const prDiff   = process.env.PR_DIFF || '';
-
-            const prompt = [
-              'You are a QA engineer reviewing a pull request against a GitHub Issue.',
-              '',
-              '## GitHub Issue body',
-              issueBody,
-              '',
-              '## PR diff (truncated to 8000 chars)',
-              prDiff,
-              '',
-              '## Your task',
-              '1. Extract every acceptance criterion (AC) from the issue body.',
-              '   Look for bullet points, numbered lists, checkboxes (- [ ]), or any',
-              '   sentence that describes expected behaviour.',
-              '2. For each AC, decide: COVERED, PARTIAL, or MISSING — based solely',
-              '   on what you can see in the diff.',
-              '3. Return ONLY a JSON array. No explanation, no markdown fences.',
-              '',
-              'Schema:',
-              '[{ "ac": "<AC text>", "status": "COVERED|PARTIAL|MISSING", "reason": "<one sentence>" }]',
-              '',
-              'If no ACs are found, return:',
-              '[{"ac": "No acceptance criteria found", "status": "MISSING", "reason": "Add AC to the GitHub Issue."}]',
-            ].join('\n');
-
-            fs.writeFileSync('/tmp/ac-prompt.txt', prompt);
-
-      - name: Analyse AC coverage with GitHub Models
-        id: ai-check
-        if: steps.issue.outputs.number != ''
         uses: actions/ai-inference@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -432,7 +384,7 @@ jobs:
 
       - name: Generate test plan with GitHub Models
         id: ai-plan
-        uses: actions/ai-inference@v1.2
+        uses: actions/ai-inference@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           model: openai/gpt-4o
