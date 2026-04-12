@@ -254,10 +254,12 @@ jobs:
 
 
   # ─────────────────────────────────────────────────────────────
-  # JOB 2: Post test plan
+  # JOB 2: Post AI-generated test plan
   # Runs on every PR open/update.
-  # Analyzes the diff and posts a structured test plan comment.
-  # Does NOT write any test code — waits for human approval.
+  # Fetches the linked GitHub Issue and the PR diff, then uses
+  # GitHub Models (gpt-4o) to generate a concrete, scenario-specific
+  # test plan comparing the PR changes to the issue requirements.
+  # Posts the plan as a PR comment and waits for human approval.
   # ─────────────────────────────────────────────────────────────
   post-test-plan:
     name: Post test plan
@@ -271,12 +273,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-
       - name: Get changed test-relevant files
         id: changed
         run: |
@@ -289,24 +285,129 @@ jobs:
         run: |
           BRANCH="${{ github.head_ref }}"
           NUMBER=$(echo "$BRANCH" | grep -oE '/[0-9]+' | grep -oE '[0-9]+' | head -1)
-          echo "number=${NUMBER:-N/A}" >> $GITHUB_OUTPUT
+          echo "number=${NUMBER:-}" >> $GITHUB_OUTPUT
 
-      - name: Post test plan template as PR comment
+      - name: Fetch issue body and PR diff
+        id: fetch
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const changedFiles = `${{ steps.changed.outputs.files }}`.trim();
-            const prNumber = context.payload.pull_request.number;
             const issueNumber = '${{ steps.issue.outputs.number }}';
+
+            let issueTitle = '';
+            let issueBody = '';
+            let issueUrl = '';
+
+            if (issueNumber) {
+              try {
+                const { data: issue } = await github.rest.issues.get({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: parseInt(issueNumber),
+                });
+                issueTitle = issue.title;
+                issueBody = (issue.body || '').slice(0, 4000);
+                issueUrl = issue.html_url;
+              } catch(e) {
+                console.log('Could not fetch issue:', e.message);
+              }
+            }
+
+            // Fetch the PR diff — limited to 8k chars to stay within model context
+            const { data: diff } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.payload.pull_request.number,
+              mediaType: { format: 'diff' },
+            });
+
+            const diffText = typeof diff === 'string'
+              ? diff.slice(0, 8000)
+              : JSON.stringify(diff).slice(0, 8000);
+
+            core.setOutput('issue_title', issueTitle);
+            core.setOutput('issue_body', issueBody);
+            core.setOutput('issue_url', issueUrl);
+            core.setOutput('pr_diff', diffText);
+
+      - name: Build test plan prompt
+        env:
+          ISSUE_TITLE: ${{ steps.fetch.outputs.issue_title }}
+          ISSUE_BODY: ${{ steps.fetch.outputs.issue_body }}
+          PR_DIFF: ${{ steps.fetch.outputs.pr_diff }}
+        run: |
+          {
+            echo "You are a QA engineer writing a test plan for a pull request on a meal planner app"
+            echo "(Node.js + Express backend, React frontend, SQLite, JWT auth, Vitest unit tests, Playwright E2E)."
+            echo ""
+            echo "## Your task"
+            echo "Compare the PR diff to the GitHub Issue requirements and produce a concrete, scenario-specific"
+            echo "test plan. Each scenario must be specific to the actual code changed — no generic placeholders."
+            echo ""
+            echo "Return ONLY a markdown document with these sections (no preamble, no explanation):"
+            echo ""
+            echo "### Unit Tests"
+            echo "- [ ] **<short name>**: given <precondition>, when <action>, then <expected result>"
+            echo ""
+            echo "### Integration Tests"
+            echo "- [ ] **<short name>**: given <precondition>, when <action>, then <expected result>"
+            echo ""
+            echo "### E2E / Happy-path tests"
+            echo "- [ ] **<short name>**: given <precondition>, when <action>, then <expected result>"
+            echo ""
+            echo "### Error / Edge cases"
+            echo "- [ ] **<short name>**: given <precondition>, when <action>, then <expected result>"
+            echo ""
+            echo "### Out of scope"
+            echo "- <reason why it is explicitly excluded>"
+            echo ""
+            echo "Rules:"
+            echo "- Maximum 40 bullet points total across all sections."
+            echo "- Each bullet must reference the specific function, route, component, or behaviour changed."
+            echo "- If the issue has no requirements, base the plan entirely on the diff."
+            echo ""
+            echo "## GitHub Issue: $ISSUE_TITLE"
+            echo "$ISSUE_BODY"
+            echo ""
+            echo "## PR diff (truncated to 8 k)"
+            echo "$PR_DIFF"
+          } > /tmp/test-plan-prompt.txt
+
+      - name: Generate test plan with GitHub Models
+        id: ai-plan
+        uses: actions/ai-inference@v1.2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          model: openai/gpt-4o
+          prompt-file: /tmp/test-plan-prompt.txt
+
+      - name: Post AI-generated test plan as PR comment
+        uses: actions/github-script@v7
+        env:
+          ISSUE_NUMBER: ${{ steps.issue.outputs.number }}
+          ISSUE_TITLE: ${{ steps.fetch.outputs.issue_title }}
+          ISSUE_URL: ${{ steps.fetch.outputs.issue_url }}
+          CHANGED_FILES: ${{ steps.changed.outputs.files }}
+          AI_PLAN: ${{ steps.ai-plan.outputs.response }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const prNumber = context.payload.pull_request.number;
+            const issueNumber = process.env.ISSUE_NUMBER;
+            const issueTitle = process.env.ISSUE_TITLE;
+            const issueUrl = process.env.ISSUE_URL;
+            const changedFiles = (process.env.CHANGED_FILES || '').trim();
+            const aiPlan = (process.env.AI_PLAN || '').trim() ||
+              '> ⚠️ AI model did not return a test plan. Review the diff manually.';
 
             const fileList = changedFiles
               ? changedFiles.split(' ').filter(Boolean).map(f => `- \`${f}\``).join('\n')
               : '- _(no source files changed)_';
 
-            const issueRef = issueNumber !== 'N/A'
-              ? `[#${issueNumber}](https://github.com/${context.repo.owner}/${context.repo.repo}/issues/${issueNumber})`
-              : 'N/A';
+            const issueRef = issueNumber
+              ? `[#${issueNumber}: ${issueTitle}](${issueUrl})`
+              : 'N/A (no issue number found in branch name)';
 
             const body = [
               '## 🧪 Test Plan (awaiting approval)',
@@ -318,23 +419,12 @@ jobs:
               '',
               '---',
               '',
-              '### E2E tests',
-              '',
-              '> _Agent: fill in the scenarios below based on the PR diff and issue AC._',
-              '',
-              '- [ ] **Happy path**: given _[precondition]_, when _[action]_, then _[expected result]_',
-              '- [ ] **Happy path**: given _[precondition]_, when _[action]_, then _[expected result]_',
-              '',
-              '### Error / edge cases',
-              '',
-              '- [ ] **Error state**: given _[precondition]_, when _[action]_, then _[expected result]_',
-              '- [ ] **Boundary condition**: given _[precondition]_, when _[action]_, then _[expected result]_',
-              '',
-              '### Out of scope',
-              '',
-              '- _[anything explicitly not being tested and why]_',
+              aiPlan,
               '',
               '---',
+              '',
+              '> _Generated automatically by comparing PR changes to the linked GitHub Issue using GitHub Models (gpt-4o)._',
+              '> _Review the scenarios above for accuracy before approving._',
               '',
               '**To approve this plan and trigger test writing, reply with:**',
               '```',
@@ -346,12 +436,32 @@ jobs:
               '> ⚠️ No test code will be written until this plan is approved by a maintainer.',
             ].join('\n');
 
-            await github.rest.issues.createComment({
+            // Update existing test-plan comment if present, otherwise create one
+            const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: prNumber,
-              body,
             });
+
+            const existing = comments.find(c =>
+              c.user?.type === 'Bot' && c.body?.startsWith('## 🧪 Test Plan')
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                body,
+              });
+            }
 
             try {
               await github.rest.issues.addLabels({
