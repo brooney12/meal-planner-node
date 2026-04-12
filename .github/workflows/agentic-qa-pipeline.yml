@@ -45,6 +45,11 @@ jobs:
     name: GitHub Issue AC check
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      models: read
 
     steps:
       - name: Checkout
@@ -97,8 +102,7 @@ jobs:
             core.setOutput('issue_body', (issue.body || '').slice(0, 4000));
             core.setOutput('pr_diff', diffText);
 
-      - name: Analyse AC coverage with GitHub Models
-        id: ai-check
+      - name: Write AI prompt file
         if: steps.issue.outputs.number != ''
         uses: actions/github-script@v7
         env:
@@ -107,6 +111,7 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
+            const fs = require('fs');
             const issueBody = process.env.ISSUE_BODY || '';
             const prDiff   = process.env.PR_DIFF || '';
 
@@ -134,33 +139,28 @@ jobs:
               '[{"ac": "No acceptance criteria found", "status": "MISSING", "reason": "Add AC to the GitHub Issue."}]',
             ].join('\n');
 
-            // GitHub Models uses an OpenAI-compatible endpoint, authenticated
-            // with the standard GITHUB_TOKEN — no extra secrets required.
-            const response = await fetch(
-              'https://models.inference.ai.azure.com/chat/completions',
-              {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  'Authorization': `Bearer ${process.env.GITHUB_TOKEN}`,
-                },
-                body: JSON.stringify({
-                  model: 'gpt-4o',
-                  messages: [{ role: 'user', content: prompt }],
-                  temperature: 0,
-                  max_tokens: 1500,
-                }),
-              }
-            );
+            fs.writeFileSync('/tmp/ac-prompt.txt', prompt);
 
-            if (!response.ok) {
-              const err = await response.text();
-              core.setFailed(`GitHub Models API error: ${response.status} — ${err}`);
-              return;
-            }
+      - name: Analyse AC coverage with GitHub Models
+        id: ai-check
+        if: steps.issue.outputs.number != ''
+        uses: actions/ai-inference@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          prompt-file: /tmp/ac-prompt.txt
+          model: openai/gpt-4o
+          max-tokens: 1500
 
-            const data = await response.json();
-            const raw = data.choices?.[0]?.message?.content || '[]';
+      - name: Parse AC results
+        id: parse-results
+        if: steps.issue.outputs.number != ''
+        uses: actions/github-script@v7
+        env:
+          RAW_RESPONSE: ${{ steps.ai-check.outputs.response }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const raw = process.env.RAW_RESPONSE || '[]';
 
             // Strip accidental markdown fences before parsing
             const cleaned = raw.replace(/```json|```/g, '').trim();
@@ -187,7 +187,7 @@ jobs:
           ISSUE_NUMBER: ${{ steps.fetch.outputs.issue_number }}
           ISSUE_TITLE: ${{ steps.fetch.outputs.issue_title }}
           ISSUE_URL: ${{ steps.fetch.outputs.issue_url }}
-          AC_RESULTS: ${{ steps.ai-check.outputs.results }}
+          AC_RESULTS: ${{ steps.parse-results.outputs.results }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
