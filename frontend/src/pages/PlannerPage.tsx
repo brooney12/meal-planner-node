@@ -192,7 +192,7 @@ Respond ONLY with valid JSON: {"Mon":{"Breakfast":7,"Lunch":3,"Dinner":5,"Snack"
       <div className={styles.pageHeader}>
         <div>
           <div className={styles.weekDateLabel}>{weekRangeLabel(weekLabel)}</div>
-          <h1 className={styles.title}>Meal <em className={styles.titleItalic}>Planner</em></h1>
+          <h1 className={styles.title}>Meal <em className={styles.titleItalic}>Planner Site</em></h1>
         </div>
         <div className={styles.headerRight}>
           <div className={styles.weekNav}>
