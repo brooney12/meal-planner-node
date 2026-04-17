@@ -44,6 +44,21 @@
 
 .logoutBtn:hover { background: #f0ede8; }
 
+.addMealBtn {
+  padding: 5px 14px;
+  border: none;
+  border-radius: 8px;
+  background: #1a1a1a;
+  font-size: 12px;
+  cursor: pointer;
+  color: #fff;
+  font-weight: 500;
+  transition: background 0.1s;
+  font-family: 'DM Sans', sans-serif;
+}
+
+.addMealBtn:hover { background: #333; }
+
 .logo {
   font-weight: 700;
   font-size: 1.1rem;
